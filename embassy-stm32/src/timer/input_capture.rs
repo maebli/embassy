@@ -155,6 +155,70 @@ impl<'d, T: GeneralInstance4Channel> InputCapture<'d, T> {
         self.new_future(channel, InputCaptureMode::BothEdges, InputTISelection::Alternate)
             .await
     }
+
+    /// Capture timestamps using DMA on a specific channel.
+    ///
+    /// This method configures the specified channel for input capture and uses DMA
+    /// to automatically store captured timestamps in the provided buffer.
+    pub async fn capture_sequence<C: TimerChannel>(
+        &mut self,
+        dma: Peri<'_, impl super::Dma<T, C>>,
+        channel: Channel,
+        buffer: &mut [u16],
+        mode: InputCaptureMode,
+        filter: FilterValue,
+    ) {
+        if buffer.is_empty() {
+            return;
+        }
+
+        // Save original timer state
+        let original_enable_state = self.is_enabled(channel);
+        let original_cc_dma_enabled = self.inner.get_cc_dma_enable_state(channel);
+
+        // Configure input capture for the channel
+        self.inner.set_input_ti_selection(channel, InputTISelection::Normal);
+        self.inner.set_input_capture_filter(channel, filter);
+        self.inner.set_input_capture_mode(channel, mode);
+        self.inner.set_input_capture_prescaler(channel, 0);
+
+        // Enable DMA for capture events on this channel
+        if !original_cc_dma_enabled {
+            self.inner.set_cc_dma_enable_state(channel, true);
+        }
+
+        // Enable the capture channel
+        if !original_enable_state {
+            self.enable(channel);
+        }
+
+        self.inner.reset();
+        self.inner.start();
+
+        #[allow(clippy::let_unit_value)]
+        let req = dma.request();
+
+        unsafe {
+            // Create DMA transfer to read from CCR register to buffer
+            Transfer::new_read(
+                dma,
+                req,
+                self.inner.regs_1ch().ccr(channel.index()).as_ptr() as *mut _,
+                buffer,
+                TransferOptions::default(),
+            )
+            .await
+        };
+
+        // Restore timer state
+        if !original_enable_state {
+            self.inner.enable_channel(channel, false);
+        }
+
+        if !original_cc_dma_enabled {
+            self.inner.set_cc_dma_enable_state(channel, false);
+        }
+    }
 }
 
 #[must_use = "futures do nothing unless you `.await` or poll them"]
