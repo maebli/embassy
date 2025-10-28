@@ -13,6 +13,7 @@ use crate::gpio::{AfType, AnyPin, Pull};
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::time::Hertz;
 use crate::timer::TimerChannel;
+use crate::dma::{Transfer, TransferOptions};
 
 /// Capture pin wrapper.
 ///
