@@ -13,7 +13,7 @@ use crate::gpio::{AfType, AnyPin, Pull};
 use crate::interrupt::typelevel::{Binding, Interrupt};
 use crate::time::Hertz;
 use crate::timer::TimerChannel;
-use crate::dma::{ChannelAndRequest, Transfer, TransferOptions};
+use crate::dma::{Transfer, TransferOptions};
 
 /// Capture pin wrapper.
 ///
@@ -37,10 +37,6 @@ impl<'d, T: GeneralInstance4Channel, C: TimerChannel, #[cfg(afio)] A> if_afio!(C
 /// Input capture driver.
 pub struct InputCapture<'d, T: GeneralInstance4Channel> {
     inner: Timer<'d, T>,
-    ch1_dma: Option<ChannelAndRequest<'d>>,
-    ch2_dma: Option<ChannelAndRequest<'d>>,
-    ch3_dma: Option<ChannelAndRequest<'d>>,
-    ch4_dma: Option<ChannelAndRequest<'d>>,
 }
 
 impl<'d, T: GeneralInstance4Channel> InputCapture<'d, T> {
@@ -53,40 +49,14 @@ impl<'d, T: GeneralInstance4Channel> InputCapture<'d, T> {
         ch3: Option<if_afio!(CapturePin<'d, T, Ch3, A>)>,
         ch4: Option<if_afio!(CapturePin<'d, T, Ch4, A>)>,
         _irq: impl Binding<T::CaptureCompareInterrupt, CaptureCompareInterruptHandler<T>> + 'd,
-        ch1_dma: Option<Peri<'d, impl super::Dma<T, Ch1>>>,
-        ch2_dma: Option<Peri<'d, impl super::Dma<T, Ch2>>>,
-        ch3_dma: Option<Peri<'d, impl super::Dma<T, Ch3>>>,
-        ch4_dma: Option<Peri<'d, impl super::Dma<T, Ch4>>>,
         freq: Hertz,
         counting_mode: CountingMode,
     ) -> Self {
-        Self::new_inner(
-            tim,
-            ch1_dma.map(|dma| new_dma!(dma)),
-            ch2_dma.map(|dma| new_dma!(dma)),
-            ch3_dma.map(|dma| new_dma!(dma)),
-            ch4_dma.map(|dma| new_dma!(dma)),
-            freq,
-            counting_mode,
-        )
+        Self::new_inner(tim, freq, counting_mode)
     }
 
-    fn new_inner(
-        tim: Peri<'d, T>,
-        ch1_dma: Option<ChannelAndRequest<'d>>,
-        ch2_dma: Option<ChannelAndRequest<'d>>,
-        ch3_dma: Option<ChannelAndRequest<'d>>,
-        ch4_dma: Option<ChannelAndRequest<'d>>,
-        freq: Hertz,
-        counting_mode: CountingMode,
-    ) -> Self {
-        let mut this = Self {
-            inner: Timer::new(tim),
-            ch1_dma,
-            ch2_dma,
-            ch3_dma,
-            ch4_dma,
-        };
+    fn new_inner(tim: Peri<'d, T>, freq: Hertz, counting_mode: CountingMode) -> Self {
+        let mut this = Self { inner: Timer::new(tim) };
 
         this.inner.set_counting_mode(counting_mode);
         this.inner.set_tick_freq(freq);
@@ -191,10 +161,9 @@ impl<'d, T: GeneralInstance4Channel> InputCapture<'d, T> {
     ///
     /// This method configures the specified channel for input capture and uses DMA
     /// to automatically store captured timestamps in the provided buffer.
-    ///
-    /// The DMA channel must be provided during construction via the `new` function.
-    pub async fn capture_sequence(
+    pub async fn capture_sequence<C: TimerChannel>(
         &mut self,
+        dma: Peri<'_, impl super::Dma<T, C>>,
         channel: Channel,
         buffer: &mut [u16],
         mode: InputCaptureMode,
@@ -203,18 +172,6 @@ impl<'d, T: GeneralInstance4Channel> InputCapture<'d, T> {
         if buffer.is_empty() {
             return;
         }
-
-        // Get the DMA channel for the specified timer channel
-        let dma = match channel {
-            Channel::Ch1 => self.ch1_dma.as_mut(),
-            Channel::Ch2 => self.ch2_dma.as_mut(),
-            Channel::Ch3 => self.ch3_dma.as_mut(),
-            Channel::Ch4 => self.ch4_dma.as_mut(),
-        };
-
-        let Some(dma) = dma else {
-            panic!("DMA not configured for channel {:?}", channel);
-        };
 
         // Save original timer state
         let original_enable_state = self.is_enabled(channel);
@@ -239,11 +196,14 @@ impl<'d, T: GeneralInstance4Channel> InputCapture<'d, T> {
         self.inner.reset();
         self.inner.start();
 
+        #[allow(clippy::let_unit_value)]
+        let req = dma.request();
+
         unsafe {
             // Create DMA transfer to read from CCR register to buffer
             Transfer::new_read(
-                &mut dma.channel,
-                dma.request,
+                dma,
+                req,
                 self.inner.regs_1ch().ccr(channel.index()).as_ptr() as *mut _,
                 buffer,
                 TransferOptions::default(),
